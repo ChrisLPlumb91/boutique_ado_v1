@@ -1,18 +1,15 @@
-from django.shortcuts import render, redirect, reverse, get_object_or_404
+from django.shortcuts import render, redirect, reverse, get_object_or_404, HttpResponse
+from django.views.decorators.http import require_POST
 from django.contrib import messages
 from django.conf import settings
-from django.http import HttpResponse
-from django.views.decorators.http import require_POST
 
-from .models import OrderLineItem
-from products.models import Product
 from .forms import OrderForm
-
+from .models import Order, OrderLineItem
+from products.models import Product
 from bag.contexts import bag_contents
 
 import stripe
-# Create your views here.
-
+import json
 
 @require_POST
 def cache_checkout_data(request):
@@ -24,12 +21,11 @@ def cache_checkout_data(request):
             'save_info': request.POST.get('save_info'),
             'username': request.user,
         })
-
         return HttpResponse(status=200)
     except Exception as e:
         messages.error(request, 'Sorry, your payment cannot be \
-            processed right now. Please try again later')
-        return HttpResponse(status=400)
+            processed right now. Please try again later.')
+        return HttpResponse(content=e, status=400)
 
 
 def checkout(request):
@@ -50,11 +46,13 @@ def checkout(request):
             'street_address2': request.POST['street_address2'],
             'county': request.POST['county'],
         }
-
         order_form = OrderForm(form_data)
-
         if order_form.is_valid():
-            order = order_form.save()
+            order = order_form.save(commit=False)
+            pid = request.POST.get('client_secret').split('_secret')[0]
+            order.stripe_pid = pid
+            order.original_bag = json.dumps(bag)
+            order.save()
             for item_id, item_data in bag.items():
                 try:
                     product = Product.objects.get(id=item_id)
@@ -90,13 +88,12 @@ def checkout(request):
     else:
         bag = request.session.get('bag', {})
         if not bag:
-            messages.error(request, "There's nothing in your bag at the moment.")
+            messages.error(request, "There's nothing in your bag at the moment")
             return redirect(reverse('products'))
 
         current_bag = bag_contents(request)
         total = current_bag['grand_total']
         stripe_total = round(total * 100)
-
         stripe.api_key = stripe_secret_key
         intent = stripe.PaymentIntent.create(
             amount=stripe_total,
@@ -113,7 +110,7 @@ def checkout(request):
     context = {
         'order_form': order_form,
         'stripe_public_key': stripe_public_key,
-        'client_secret': 'test client secret',
+        'client_secret': intent.client_secret,
     }
 
     return render(request, template, context)
@@ -138,4 +135,3 @@ def checkout_success(request, order_number):
     }
 
     return render(request, template, context)
-
